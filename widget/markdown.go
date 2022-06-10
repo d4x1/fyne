@@ -158,6 +158,14 @@ func (m *markdownRenderer) Render(_ io.Writer, source []byte, n ast.Node) error 
 func (m *markdownRenderer) handleExitNode(n ast.Node) error {
 	if n.Kind().String() == "Blockquote" {
 		m.blockquote = false
+	} else if n.Kind().String() == "Emphasis" {
+		m.segs = append(m.segs, &TextSegment{
+			Style: RichTextStyleInline,
+		})
+	} else if n.Kind().String() == "Emph" {
+		m.segs = append(m.segs, &TextSegment{
+			Style: RichTextStyleInline,
+		})
 	} else if n.Kind().String() == "List" {
 		listSegs := m.segs
 		m.segs = m.parentStack[len(m.parentStack)-1]
