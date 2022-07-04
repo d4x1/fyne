@@ -25,6 +25,7 @@ type fyneApp struct {
 	icon     fyne.Resource
 	uniqueID string
 
+	cloud     fyne.CloudProvider
 	lifecycle fyne.Lifecycle
 	settings  *settings
 	storage   *store
@@ -32,6 +33,10 @@ type fyneApp struct {
 
 	running uint32 // atomic, 1 == running, 0 == stopped
 	exec    func(name string, arg ...string) *execabs.Cmd
+}
+
+func (a *fyneApp) CloudProvider() fyne.CloudProvider {
+	return a.cloud
 }
 
 func (a *fyneApp) Icon() fyne.Resource {
@@ -54,7 +59,7 @@ func (a *fyneApp) UniqueID() string {
 		return a.Metadata().ID
 	}
 
-	fyne.LogError("Preferences API requires a unique ID, use app.NewWithID()", nil)
+	fyne.LogError("Preferences API requires a unique ID, use app.NewWithID() or the FyneApp.toml ID field", nil)
 	a.uniqueID = "missing-id-" + strconv.FormatInt(time.Now().Unix(), 10) // This is a fake unique - it just has to not be reused...
 	return a.uniqueID
 }
@@ -68,6 +73,39 @@ func (a *fyneApp) Run() {
 		a.driver.Run()
 		return
 	}
+}
+
+func (a *fyneApp) SetCloudProvider(p fyne.CloudProvider) {
+	if p == nil {
+		a.cloud = nil
+		return
+	}
+
+	a.transitionCloud(p)
+}
+
+func (a *fyneApp) transitionCloud(p fyne.CloudProvider) {
+	err := p.Setup(a)
+	if err != nil {
+		fyne.LogError("Failed to set up cloud provider "+p.ProviderName(), err)
+		return
+	}
+	a.cloud = p
+
+	listeners := a.prefs.ChangeListeners()
+	if pp, ok := p.(fyne.CloudProviderPreferences); ok {
+		a.prefs = pp.CloudPreferences(a)
+	} else {
+		a.prefs = a.newDefaultPreferences()
+	}
+
+	for _, l := range listeners {
+		a.prefs.AddChangeListener(l)
+		l() // assume that preferences have changed because we replaced the provider
+	}
+
+	// after transition ensure settings listener is fired
+	a.settings.apply()
 }
 
 func (a *fyneApp) Quit() {
@@ -94,8 +132,8 @@ func (a *fyneApp) Storage() fyne.Storage {
 }
 
 func (a *fyneApp) Preferences() fyne.Preferences {
-	if a.uniqueID == "" {
-		fyne.LogError("Preferences API requires a unique ID, use app.NewWithID()", nil)
+	if a.UniqueID() == "" {
+		fyne.LogError("Preferences API requires a unique ID, use app.NewWithID() or the FyneApp.toml ID field", nil)
 	}
 	return a.prefs
 }
@@ -104,18 +142,28 @@ func (a *fyneApp) Lifecycle() fyne.Lifecycle {
 	return a.lifecycle
 }
 
-// New returns a new application instance with the default driver and no unique ID
+func (a *fyneApp) newDefaultPreferences() fyne.Preferences {
+	p := fyne.Preferences(newPreferences(a))
+	if pref, ok := p.(interface{ load() }); ok && a.uniqueID != "" {
+		pref.load()
+	}
+	return p
+}
+
+// New returns a new application instance with the default driver and no unique ID (unless specified in FyneApp.toml)
 func New() fyne.App {
-	internal.LogHint("Applications should be created with a unique ID using app.NewWithID()")
-	return NewWithID("")
+	if meta.ID == "" {
+		internal.LogHint("Applications should be created with a unique ID using app.NewWithID()")
+	}
+	return NewWithID(meta.ID)
 }
 
 func newAppWithDriver(d fyne.Driver, id string) fyne.App {
 	newApp := &fyneApp{uniqueID: id, driver: d, exec: execabs.Command, lifecycle: &app.Lifecycle{}}
 	fyne.SetCurrentApp(newApp)
-	newApp.settings = loadSettings()
 
-	newApp.prefs = newPreferences(newApp)
+	newApp.prefs = newApp.newDefaultPreferences()
+	newApp.settings = loadSettings()
 	newApp.storage = &store{a: newApp}
 	if id != "" {
 		if pref, ok := newApp.prefs.(interface{ load() }); ok {

@@ -3,12 +3,39 @@
 This file lists the main changes with each version of the Fyne toolkit.
 More detailed release notes can be found on the [releases page](https://github.com/fyne-io/fyne/releases). 
 
-## 2.2.1 - Ongoing
+## 2.3.0 - Ongoing
+
+### Added
+
+* Add menu icon support to system tray menus
+
+### Changed
+
+### Fixed
+
+
+## 2.2.2 - 30 June 2022
+
+### Fixed
+
+* Windows missing version metadata when packaged (#3046)
+* Fyne package would not build apps using old Fyne versions
+* System tray icon may not be removed on app exit in Windows
+* Emphasis in Markdown gives erroneous output in RichText (#2974)
+* When last visible window is closed, hidden window is set visible (#3059)
+* Do not close app when last window is closed but systrayMenu exists (#3092)
+* Image with ImageFillOriginal not showing (#3102)
+
+
+## 2.2.1 - 12 June 2022
 
 ### Fixed
 
 * Fix various race conditions and compatibility issues with System tray menus
 * Resolve issue where macOS systray menu may not appear
+* Updated yaml dependency to fix CVE-2022-28948
+* Tab buttons stop working after removing a tab (#3050)
+* os.SetEnv("FYNE_FONT") doesn't work in v2.2.0 (#3056)
 
 
 ## 2.2.0 - 7 June 2022

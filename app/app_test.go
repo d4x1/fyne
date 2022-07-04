@@ -5,9 +5,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"fyne.io/fyne/v2"
 	_ "fyne.io/fyne/v2/test"
-	"github.com/stretchr/testify/assert"
+	"fyne.io/fyne/v2/theme"
 
 	"golang.org/x/sys/execabs"
 )
@@ -29,6 +31,11 @@ func TestFyneApp_UniqueID(t *testing.T) {
 	app := NewWithID(appID)
 
 	assert.Equal(t, appID, app.UniqueID())
+
+	meta.ID = "fakedInject"
+	app = New()
+
+	assert.Equal(t, meta.ID, app.UniqueID())
 }
 
 func TestFyneApp_OpenURL(t *testing.T) {
@@ -48,4 +55,49 @@ func TestFyneApp_OpenURL(t *testing.T) {
 	}
 
 	assert.Equal(t, urlStr, opened)
+}
+
+func TestFyneApp_SetCloudProvider(t *testing.T) {
+	a := NewWithID("io.fyne.test")
+	p := &mockCloud{}
+	a.SetCloudProvider(p)
+
+	assert.Equal(t, p, a.CloudProvider())
+	assert.True(t, p.configured)
+}
+
+func TestFyneApp_transitionCloud(t *testing.T) {
+	a := NewWithID("io.fyne.test")
+	p := &mockCloud{}
+	preferenceChanged := false
+	settingsChan := make(chan fyne.Settings)
+	a.Preferences().AddChangeListener(func() {
+		preferenceChanged = true
+	})
+	a.Settings().AddChangeListener(settingsChan)
+	a.SetCloudProvider(p)
+
+	<-settingsChan // settings were updated
+	assert.True(t, preferenceChanged)
+}
+
+type mockCloud struct {
+	configured bool
+}
+
+func (c *mockCloud) ProviderDescription() string {
+	return "Mock cloud implementation"
+}
+
+func (c *mockCloud) ProviderIcon() fyne.Resource {
+	return theme.FyneLogo()
+}
+
+func (c *mockCloud) ProviderName() string {
+	return "mock"
+}
+
+func (c *mockCloud) Setup(fyne.App) error {
+	c.configured = true
+	return nil
 }
