@@ -9,6 +9,7 @@ import (
 	"fyne.io/fyne/v2/internal"
 	"fyne.io/fyne/v2/internal/app"
 	"fyne.io/fyne/v2/internal/cache"
+	"fyne.io/fyne/v2/internal/painter"
 	"fyne.io/fyne/v2/theme"
 )
 
@@ -19,7 +20,7 @@ func init() {
 
 type testApp struct {
 	driver       *testDriver
-	settings     fyne.Settings
+	settings     *testSettings
 	prefs        fyne.Preferences
 	propertyLock sync.RWMutex
 	storage      fyne.Storage
@@ -76,7 +77,12 @@ func (a *testApp) SendNotification(notify *fyne.Notification) {
 }
 
 func (a *testApp) SetCloudProvider(p fyne.CloudProvider) {
-	a.cloud = p
+	if p == nil {
+		a.cloud = nil
+		return
+	}
+
+	a.transitionCloud(p)
 }
 
 func (a *testApp) Settings() fyne.Settings {
@@ -106,6 +112,39 @@ func (a *testApp) lastAppliedTheme() fyne.Theme {
 	return a.appliedTheme
 }
 
+func (a *testApp) transitionCloud(p fyne.CloudProvider) {
+	if a.cloud != nil {
+		a.cloud.Cleanup(a)
+	}
+
+	err := p.Setup(a)
+	if err != nil {
+		fyne.LogError("Failed to set up cloud provider "+p.ProviderName(), err)
+		return
+	}
+	a.cloud = p
+
+	listeners := a.prefs.ChangeListeners()
+	if pp, ok := p.(fyne.CloudProviderPreferences); ok {
+		a.prefs = pp.CloudPreferences(a)
+	} else {
+		a.prefs = internal.NewInMemoryPreferences()
+	}
+	if store, ok := p.(fyne.CloudProviderStorage); ok {
+		a.storage = store.CloudStorage(a)
+	} else {
+		a.storage = &testStorage{}
+	}
+
+	for _, l := range listeners {
+		a.prefs.AddChangeListener(l)
+		l() // assume that preferences have changed because we replaced the provider
+	}
+
+	// after transition ensure settings listener is fired
+	a.settings.apply()
+}
+
 // NewApp returns a new dummy app used for testing.
 // It loads a test driver which creates a virtual window in memory for testing.
 func NewApp() fyne.App {
@@ -116,6 +155,7 @@ func NewApp() fyne.App {
 		lifecycle: &app.Lifecycle{}}
 	root, _ := store.docRootURI()
 	store.Docs = &internal.Docs{RootDocURI: root}
+	painter.ClearFontCache()
 	cache.ResetThemeCaches()
 	fyne.SetCurrentApp(test)
 
@@ -124,10 +164,11 @@ func NewApp() fyne.App {
 	go func() {
 		for {
 			<-listener
+			test.propertyLock.Lock()
+			painter.ClearFontCache()
 			cache.ResetThemeCaches()
 			app.ApplySettings(test.Settings(), test)
 
-			test.propertyLock.Lock()
 			test.appliedTheme = test.Settings().Theme()
 			test.propertyLock.Unlock()
 		}
@@ -193,6 +234,11 @@ func (s *testSettings) apply() {
 	s.propertyLock.RUnlock()
 
 	for _, listener := range listeners {
-		listener <- s
+		select {
+		case listener <- s:
+		default:
+			l := listener
+			go func() { l <- s }()
+		}
 	}
 }

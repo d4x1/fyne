@@ -2,6 +2,7 @@ package commands
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,6 +25,8 @@ type Builder struct {
 	release            bool
 	tags               []string
 	tagsToParse        string
+
+	customMetadata keyValueFlag
 
 	runner runner
 }
@@ -64,6 +67,11 @@ func Build() *cli.Command {
 				Usage:       "Specify a name for the output file, default is based on the current directory.",
 				Destination: &b.target,
 			},
+			&cli.GenericFlag{
+				Name:  "metadata",
+				Usage: "Specify custom metadata key value pair that you do not want to store in your FyneApp.toml (key=value)",
+				Value: &b.customMetadata,
+			},
 		},
 		Action: func(ctx *cli.Context) error {
 			argCount := ctx.Args().Len()
@@ -72,6 +80,10 @@ func Build() *cli.Command {
 					return fmt.Errorf("incorrect amount of path provided")
 				}
 				b.goPackage = ctx.Args().First()
+			}
+
+			if b.customMetadata.m == nil {
+				b.customMetadata.m = map[string]string{}
 			}
 
 			return b.Build()
@@ -93,6 +105,8 @@ func (b *Builder) Build() error {
 	if b.tagsToParse != "" {
 		b.tags = strings.Split(b.tagsToParse, ",")
 	}
+	b.appData.Release = b.release
+	b.appData.CustomMetadata = b.customMetadata.m
 
 	return b.build()
 }
@@ -165,50 +179,16 @@ func getFyneGoModVersion(runner runner) (string, error) {
 	return "", fmt.Errorf("fyne version not found")
 }
 
-func (b *Builder) createMetadataInitFile() (func(), error) {
-	data, err := metadata.LoadStandard(b.srcdir)
-	if err == nil {
-		mergeMetadata(b.appData, data)
-	}
-
-	metadataInitFilePath := filepath.Join(b.srcdir, "fyne_metadata_init.go")
-	metadataInitFile, err := os.Create(metadataInitFilePath)
-	if err != nil {
-		return func() {}, err
-	}
-	defer metadataInitFile.Close()
-
-	err = templates.FyneMetadataInit.Execute(metadataInitFile, b.appData)
-	if err == nil {
-		if b.icon != "" {
-			writeResource(b.icon, "fyneMetadataIcon", metadataInitFile)
-		}
-	}
-
-	return func() { os.Remove(metadataInitFilePath) }, err
-}
-
-func (b *Builder) injectMetadataIfPossible(runner runner, createMetadataInitFile func() (func(), error)) (func(), error) {
-	fyneGoModVersion, err := getFyneGoModVersion(runner)
-	if err != nil {
-		return nil, err
-	}
-
-	fyneGoModVersionNormalized := version.Normalize(fyneGoModVersion)
-	fyneGoModVersionConstraint := version.NewConstrainGroupFromString(">=2.2")
-	if fyneGoModVersion != "master" && !fyneGoModVersionConstraint.Match(fyneGoModVersionNormalized) {
-		return nil, nil
-	}
-
-	return createMetadataInitFile()
-}
-
 func (b *Builder) build() error {
 	var versionConstraint *version.ConstraintGroup
 
 	goos := b.os
 	if goos == "" {
 		goos = targetOS()
+	}
+
+	if goos == "gopherjs" && runtime.GOOS == "windows" {
+		return errors.New("gopherjs doesn't support Windows. Only wasm target is supported for the web output. You can also use fyne-cross to solve this")
 	}
 
 	fyneGoModRunner := b.runner
@@ -221,7 +201,14 @@ func (b *Builder) build() error {
 		}
 	}
 
-	close, err := b.injectMetadataIfPossible(fyneGoModRunner, b.createMetadataInitFile)
+	if b.icon == "" {
+		defaultIcon := filepath.Join(b.srcdir, "Icon.png")
+		if util.Exists(defaultIcon) {
+			b.icon = defaultIcon
+		}
+	}
+
+	close, err := injectMetadataIfPossible(fyneGoModRunner, b.srcdir, b.appData, createMetadataInitFile)
 	if err != nil {
 		fyne.LogError("Failed to inject metadata init file, omitting metadata", err)
 	} else if close != nil {
@@ -232,7 +219,8 @@ func (b *Builder) build() error {
 	env := os.Environ()
 
 	if goos == "darwin" {
-		env = append(env, "CGO_CFLAGS=-mmacosx-version-min=10.11", "CGO_LDFLAGS=-mmacosx-version-min=10.11")
+		appendEnv(&env, "CGO_CFLAGS", "-mmacosx-version-min=10.11")
+		appendEnv(&env, "CGO_LDFLAGS", "-mmacosx-version-min=10.11")
 	}
 
 	if !isWeb(goos) {
@@ -240,12 +228,12 @@ func (b *Builder) build() error {
 
 		if goos == "windows" {
 			if b.release {
-				args = append(args, "-ldflags", "-s -w -H=windowsgui ")
+				args = append(args, "-ldflags", "-s -w -H=windowsgui", "-trimpath")
 			} else {
 				args = append(args, "-ldflags", "-H=windowsgui ")
 			}
 		} else if b.release {
-			args = append(args, "-ldflags", "-s -w ")
+			args = append(args, "-ldflags", "-s -w", "-trimpath")
 		}
 	}
 
@@ -298,6 +286,60 @@ func (b *Builder) build() error {
 	return err
 }
 
+func createMetadataInitFile(srcdir string, app *appData) (func(), error) {
+	data, err := metadata.LoadStandard(srcdir)
+	if err == nil {
+		mergeMetadata(app, data)
+	}
+
+	metadataInitFilePath := filepath.Join(srcdir, "fyne_metadata_init.go")
+	metadataInitFile, err := os.Create(metadataInitFilePath)
+	if err != nil {
+		return func() {}, err
+	}
+	defer metadataInitFile.Close()
+
+	app.ResGoString = "nil"
+	if app.icon != "" {
+		res, err := fyne.LoadResourceFromPath(app.icon)
+		if err != nil {
+			fyne.LogError("Unable to load medadata icon file "+app.icon, err)
+			return func() { os.Remove(metadataInitFilePath) }, err
+		}
+
+		// The return type of fyne.LoadResourceFromPath is always a *fyne.StaticResource.
+		app.ResGoString = res.(*fyne.StaticResource).GoString()
+	}
+
+	err = templates.FyneMetadataInit.Execute(metadataInitFile, app)
+	if err != nil {
+		fyne.LogError("Error executing metadata template", err)
+	}
+
+	return func() { os.Remove(metadataInitFilePath) }, err
+}
+
+func injectMetadataIfPossible(runner runner, srcdir string, app *appData,
+	createMetadataInitFile func(srcdir string, app *appData) (func(), error)) (func(), error) {
+	fyneGoModVersion, err := getFyneGoModVersion(runner)
+	if err != nil {
+		return nil, err
+	}
+
+	fyneGoModVersionNormalized := version.Normalize(fyneGoModVersion)
+	fyneGoModVersionConstraint := version.NewConstrainGroupFromString(">=2.2")
+	if fyneGoModVersion != "master" && !fyneGoModVersionConstraint.Match(fyneGoModVersionNormalized) {
+		return nil, nil
+	}
+
+	fyneGoModVersionAtLeast2_3 := version.NewConstrainGroupFromString(">=2.3")
+	if fyneGoModVersionAtLeast2_3.Match(fyneGoModVersionNormalized) {
+		app.VersionAtLeast2_3 = true
+	}
+
+	return createMetadataInitFile(srcdir, app)
+}
+
 func targetOS() string {
 	osEnv, ok := os.LookupEnv("GOOS")
 	if ok {
@@ -305,4 +347,17 @@ func targetOS() string {
 	}
 
 	return runtime.GOOS
+}
+
+func appendEnv(env *[]string, varName, value string) {
+	for i := range *env {
+		keyValue := strings.SplitN((*env)[i], "=", 2)
+
+		if keyValue[0] == varName {
+			(*env)[i] += " " + value
+			return
+		}
+	}
+
+	*env = append(*env, varName+"="+value)
 }

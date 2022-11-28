@@ -22,6 +22,8 @@ import (
 	"github.com/go-gl/glfw/v3.3/glfw"
 )
 
+const defaultTitle = "Fyne Application"
+
 // Input modes.
 const (
 	CursorMode             glfw.InputMode = glfw.CursorMode
@@ -38,10 +40,7 @@ const (
 	CursorDisabled int = glfw.CursorDisabled
 )
 
-var (
-	cursorMap    map[desktop.StandardCursor]*glfw.Cursor
-	defaultTitle = "Fyne Application"
-)
+var cursorMap map[desktop.StandardCursor]*glfw.Cursor
 
 func initCursors() {
 	cursorMap = map[desktop.StandardCursor]*glfw.Cursor{
@@ -158,8 +157,8 @@ func (w *window) doCenterOnScreen() {
 	monX, monY := monitor.GetPos()
 
 	// math them to the middle
-	newX := (monMode.Width / 2) - (viewWidth / 2) + monX
-	newY := (monMode.Height / 2) - (viewHeight / 2) + monY
+	newX := (monMode.Width-viewWidth)/2 + monX
+	newY := (monMode.Height-viewHeight)/2 + monY
 
 	// set new window coordinates
 	w.viewport.SetPos(newX, newY)
@@ -278,6 +277,9 @@ func (w *window) getMonitorForWindow() *glfw.Monitor {
 }
 
 func (w *window) detectScale() float32 {
+	if isWayland { // Wayland controls scale through content scaling
+		return 1.0
+	}
 	monitor := w.getMonitorForWindow()
 	widthMm, _ := monitor.GetPhysicalSize()
 	widthPx := monitor.GetVideoMode().Width
@@ -291,6 +293,15 @@ func (w *window) moved(_ *glfw.Window, x, y int) {
 
 func (w *window) resized(_ *glfw.Window, width, height int) {
 	w.processResized(width, height)
+}
+
+func (w *window) scaled(_ *glfw.Window, x float32, y float32) {
+	if !isWayland { // other platforms handle this using older APIs
+		return
+	}
+
+	w.canvas.texScale = x
+	w.canvas.Refresh(w.canvas.content)
 }
 
 func (w *window) frameSized(_ *glfw.Window, width, height int) {
@@ -692,6 +703,7 @@ func (w *window) create() {
 		win.SetSizeCallback(w.resized)
 		win.SetFramebufferSizeCallback(w.frameSized)
 		win.SetRefreshCallback(w.refresh)
+		win.SetContentScaleCallback(w.scaled)
 		win.SetCursorPosCallback(w.mouseMoved)
 		win.SetMouseButtonCallback(w.mouseClicked)
 		win.SetScrollCallback(w.mouseScrolled)
